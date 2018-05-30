@@ -93,6 +93,7 @@ def get_training_input(filenames, params):
         :returns: A dictionary of pair <Key, Tensor>
         """
 
+
     with tf.device("/cpu:0"):
         src_dataset = tf.data.TextLineDataset(filenames[0])
         tgt_dataset = tf.data.TextLineDataset(filenames[1])
