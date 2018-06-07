@@ -8,9 +8,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import model as model
+import models as models
 import data.vocab as vocabulary
 import data.dataset as dataset
+import data.cache as cache
+import utils.parallel as parallel
+import utils.optimize as optimize
 import argparse
 import os
 import six
@@ -180,7 +183,7 @@ def override_parameters(params, args):
         params.vocabulary["target"], params
     )
 
-    control_symbols = [params.pad, params.bos, params.eos, params.unk]
+    control_symbols = [params.pad, params.unk]
 
     params.mapping = {
         "source": vocabulary.get_control_mapping(
@@ -213,11 +216,66 @@ def get_initializer(params):
     else:
         raise ValueError("Unrecognized initializer: %s" % params.initializer)
 
+def get_learning_rate_decay(learning_rate, global_step, params):
+    if params.learning_rate_decay in ["linear_warmup_rsqrt_decay", "noam"]:
+        step = tf.to_float(global_step)
+        warmup_steps = tf.to_float(params.warmup_steps)
+        multiplier = params.hidden_size ** -0.5
+        decay = multiplier * tf.minimum((step + 1) * (warmup_steps ** -1.5),
+                                        (step + 1) ** -0.5)
 
+        return learning_rate * decay
+    elif params.learning_rate_decay == "piecewise_constant":
+        return tf.train.piecewise_constant(tf.to_int32(global_step),
+                                           params.learning_rate_boundaries,
+                                           params.learning_rate_values)
+    elif params.learning_rate_decay == "none":
+        return learning_rate
+    else:
+        raise ValueError("Unknown learning_rate_decay")
+
+def session_config(params):
+    optimizer_options = tf.OptimizerOptions(opt_level=tf.OptimizerOptions.L1,
+                                            do_function_inlining=True)
+    graph_options = tf.GraphOptions(optimizer_options=optimizer_options)
+    config = tf.ConfigProto(allow_soft_placement=True,
+                            graph_options=graph_options)
+    if params.device_list:
+        device_str = ",".join([str(i) for i in params.device_list])
+        config.gpu_options.visible_device_list = device_str
+
+    return config
+
+def restore_variables(checkpoint):
+    if not checkpoint:
+        return tf.no_op("restore_op")
+
+    # Load checkpoints
+    tf.logging.info("Loading %s" % checkpoint)
+    var_list = tf.train.list_variables(checkpoint)
+    reader = tf.train.load_checkpoint(checkpoint)
+    values = {}
+
+    for (name, shape) in var_list:
+        tensor = reader.get_tensor(name)
+        name = name.split(":")[0]
+        values[name] = tensor
+
+    var_list = tf.trainable_variables()
+    ops = []
+
+    for var in var_list:
+        name = var.name.split(":")[0]
+
+        if name in values:
+            tf.logging.info("Restore %s" % var.name)
+            ops.append(tf.assign(var, values[name]))
+
+    return tf.group(*ops, name="restore_op")
 
 def main(args):
     tf.logging.set_verbosity(tf.logging.INFO)
-    model_cls = model.get_model(args.model)
+    model_cls = models.get_model(args.model)
 
     params = default_parameters()
 
@@ -241,10 +299,62 @@ def main(args):
         if not params.record:
             # Build input queue
             features = dataset.get_training_input(params.input, params)
-        else:
-            features = record.get_input_features(
-                os.path.join(params.record, "*train*"), "train", params
+            update_cycle = params.update_cycle
+            features, init_op = cache.cache_features(features, update_cycle)
+
+            #build model
+            initializer = get_initializer(params)
+            regularizer = tf.contrib.layers.l1_l2_regularizer(
+                scale_l1=params.scale_l1, scale_l2=params.scale_l2)
+
+            model = model_cls(params)
+
+            # Create global step
+            global_step = tf.train.get_or_create_global_step()
+
+            # Multi-GPU setting
+            sharded_losses = parallel.parallel_model(
+                model.get_training_func(initializer, regularizer),
+                features,
+                params.device_list
             )
+            loss = tf.add_n(sharded_losses) / len(sharded_losses)
+            loss = loss + tf.losses.get_regularization_loss()
+
+            # Print parameters
+            all_weights = {v.name: v for v in tf.trainable_variables()}
+            total_size = 0
+
+            for v_name in sorted(list(all_weights)):
+                v = all_weights[v_name]
+                tf.logging.info("%s\tshape    %s", v.name[:-2].ljust(80),
+                                str(v.shape).ljust(20))
+                v_size = np.prod(np.array(v.shape.as_list())).tolist()
+                total_size += v_size
+            tf.logging.info("Total trainable variables size: %d", total_size)
+
+            learning_rate = get_learning_rate_decay(params.learning_rate,
+                                                   global_step, params)
+            learning_rate = tf.convert_to_tensor(learning_rate, dtype=tf.float32)
+            tf.summary.scalar("learning_rate", learning_rate)
+
+            # Create optimizer
+            if params.optimizer == "Adam":
+                opt = tf.train.AdamOptimizer(learning_rate,
+                                             beta1=params.adam_beta1,
+                                             beta2=params.adam_beta2,
+                                             epsilon=params.adam_epsilon)
+            elif params.optimizer == "LazyAdam":
+                opt = tf.contrib.opt.LazyAdamOptimizer(learning_rate,
+                                                       beta1=params.adam_beta1,
+                                                       beta2=params.adam_beta2,
+                                                       epsilon=params.adam_epsilon)
+            else:
+                raise RuntimeError("Optimizer %s not supported" % params.optimizer)
+
+            loss, ops = optimize.create_train_op(loss, opt, global_step, params)
+            restore_op = restore_variables(args.checkpoint)
+
 
 if __name__ == "__main__":
     main(parse_args())
