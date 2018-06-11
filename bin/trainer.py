@@ -14,6 +14,8 @@ import data.dataset as dataset
 import data.cache as cache
 import utils.parallel as parallel
 import utils.optimize as optimize
+import utils.hooks as hooks
+import utils.inference as inference
 import argparse
 import os
 import six
@@ -234,6 +236,7 @@ def get_learning_rate_decay(learning_rate, global_step, params):
     else:
         raise ValueError("Unknown learning_rate_decay")
 
+
 def session_config(params):
     optimizer_options = tf.OptimizerOptions(opt_level=tf.OptimizerOptions.L1,
                                             do_function_inlining=True)
@@ -245,6 +248,28 @@ def session_config(params):
         config.gpu_options.visible_device_list = device_str
 
     return config
+
+
+def decode_target_ids(inputs, params):
+    decoded = []
+    vocab = params.vocabulary["target"]
+
+    for item in inputs:
+        syms = []
+        for idx in item:
+            if isinstance(idx, six.integer_types):
+                sym = vocab[idx]
+            else:
+                sym = idx
+
+            if sym == params.pad:
+                break
+
+            syms.append(sym)
+        decoded.append(syms)
+
+    return decoded
+
 
 def restore_variables(checkpoint):
     if not checkpoint:
@@ -354,6 +379,83 @@ def main(args):
 
             loss, ops = optimize.create_train_op(loss, opt, global_step, params)
             restore_op = restore_variables(args.checkpoint)
+
+            # Validation
+            if params.validation and params.references[0]:
+                files = [params.validation] + list(params.references)
+                eval_inputs = dataset.sort_and_zip_files(files)
+                eval_input_fn = dataset.get_evaluation_input
+            else:
+                eval_input_fn = None
+
+            # Add hooks
+            save_vars = tf.trainable_variables() + [global_step]
+            saver = tf.train.Saver(
+                var_list=save_vars if params.only_save_trainable else None,
+                max_to_keep=params.keep_checkpoint_max,
+                sharded=False
+            )
+            tf.add_to_collection(tf.GraphKeys.SAVERS, saver)
+            multiplier = tf.convert_to_tensor([update_cycle, 1])
+
+            train_hooks = [
+                tf.train.StopAtStepHook(last_step=params.train_steps),
+                tf.train.NanTensorHook(loss),
+                tf.train.LoggingTensorHook(
+                    {
+                        "step": global_step,
+                        "loss": loss,
+                        "source": tf.shape(features["source"]) * multiplier,
+                        "target": tf.shape(features["target"]) * multiplier
+                    },
+                    every_n_iter=1
+                ),
+                tf.train.CheckpointSaverHook(
+                    checkpoint_dir=params.output,
+                    save_secs=params.save_checkpoint_secs or None,
+                    save_steps=params.save_checkpoint_steps or None,
+                    saver=saver
+                )
+            ]
+
+            config = session_config(params)
+
+            if eval_input_fn is not None:
+                train_hooks.append(
+                    hooks.EvaluationHook(
+                        lambda f: inference.create_inference_graph(
+                            [model], f, params
+                        ),
+                        lambda: eval_input_fn(eval_inputs, params),
+                        lambda x: decode_target_ids(x, params),
+                        params.output,
+                        config,
+                        params.keep_top_checkpoint_max,
+                        eval_secs=params.eval_secs,
+                        eval_steps=params.eval_steps
+                    )
+                )
+
+            def restore_fn(step_context):
+                step_context.session.run(restore_op)
+
+            def step_fn(step_context):
+                # Bypass hook calls
+                step_context.session.run([init_op, ops["zero_op"]])
+                for i in range(update_cycle - 1):
+                    step_context.session.run(ops["collect_op"])
+
+                return step_context.run_with_hooks(ops["train_op"])
+
+            # Create session, do not use default CheckpointSaverHook
+            with tf.train.MonitoredTrainingSession(
+                    checkpoint_dir=params.output, hooks=train_hooks,
+                    save_checkpoint_secs=None, config=config) as sess:
+                # Restore pre-trained variables
+                sess.run_step_fn(restore_fn)
+
+                while not sess.should_stop():
+                    sess.run_step_fn(step_fn)
 
 
 if __name__ == "__main__":

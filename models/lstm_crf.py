@@ -8,6 +8,12 @@ import tensorflow as tf
 import copy
 import interface.model as model
 
+
+def _copy_through(time, length, output, new_output):
+    copy_cond = (time >= length)
+    return tf.where(copy_cond, output, new_output)
+
+
 def encoding_graph(features, mode, params):
 
     if mode != 'train':
@@ -33,9 +39,47 @@ def encoding_graph(features, mode, params):
     inputs = tf.gather(src_embedding, src_seq)
 
 
-def _lstm_encoder(cell, inputs, sequence_length, initial_state, dtype=None):
+def _lstm_encoder(cell, inputs, sequence_length, initial_state, dtype):
+    output_size = cell.output_size
+    dtype = dtype or inputs.dtype
+    batch = tf.shape(inputs)[0]
+    time_steps = tf.shape(inputs)[1]
 
-    a = 1
+    zero_output = tf.zeros([batch, output_size], dtype)
+    if initial_state is None:
+        initial_state = cell.zero_state(batch, dtype)
+
+    input_ta = tf.TensorArray(dtype, time_steps,
+                              tensor_array_name="input_array")
+    output_ta = tf.TensorArray(dtype, time_steps,
+                               tensor_array_name="output_array")
+    input_ta = input_ta.unstack(tf.transpose(inputs, [1, 0, 2]))
+
+    def loop_func(t, out_ta, state):
+        inp_t = input_ta.read(t)
+        cell_output, new_state = cell(inp_t, state)
+        cell_output = _copy_through(t, sequence_length, zero_output,
+                                    cell_output)
+        new_state = _copy_through(t, sequence_length, state, new_state)
+        out_ta = out_ta.write(t, cell_output)
+        return t + 1, out_ta, new_state
+
+    time = tf.constant(0, dtype=tf.int32, name="time")
+    loop_vars = (time, output_ta, initial_state)
+
+    outputs = tf.while_loop(lambda t, *_: t < time_steps, loop_func,
+                            loop_vars, parallel_iterations=32,
+                            swap_memory=True)
+
+    output_final_ta = outputs[1]
+    final_state = outputs[2]
+
+    all_output = output_final_ta.stack()
+    all_output.set_shape([None, None, output_size])
+    all_output = tf.transpose(all_output, [1, 0, 2])
+
+    return all_output, final_state
+
 
 def _encoder(cell_fw, cell_bw, inputs, sequence_length, dtype=None,
              scope=None):
@@ -56,6 +100,23 @@ def _encoder(cell_fw, cell_bw, inputs, sequence_length, dtype=None,
             output_bw = tf.reverse_sequence(output_bw, sequence_length,
                                             batch_axis=0, seq_axis=1)
 
+        results = {
+            # [batch, maxlen, 2*hidden]
+            "annotation": tf.concat([output_fw, output_bw], axis=2),
+            "outputs": {
+                # [batch,maxlen,hidden]
+                "forward": output_fw,
+                "backward": output_bw
+            },
+            "final_states": {
+                # [batch,hidden]
+                "forward": state_fw,
+                "backward": state_bw
+            }
+        }
+
+        return results
+
 
 
 def model_graph(features, mode, params):
@@ -69,7 +130,7 @@ def model_graph(features, mode, params):
 
         src_bias = tf.get_variable("bias", [params.embedding_size])
         src_inputs = tf.nn.embedding_lookup(src_emb, features["source"])
-
+        time_steps = tf.shape(src_inputs)[1]
         src_inputs = tf.nn.bias_add(src_inputs, src_bias)
         if params.dropout and not params.use_variational_dropout:
             src_inputs = tf.nn.dropout(src_inputs, 1-params.dropout)
@@ -101,7 +162,34 @@ def model_graph(features, mode, params):
             )
 
         encoder_output = _encoder(cell_fw, cell_bw, src_inputs, features["source_length"])
-    return ""
+
+        output = encoder_output["annotation"]
+        output = tf.reshape(output, [-1, params.hidden_size * 2])
+
+        if mode == 'train':
+            output = tf.nn.dropout(output, params.dropout)
+
+        with tf.variable_scope("softmax"):
+            weights = tf.get_variable([params.hidden_size * 2, tgt_vocab_size])
+            bias = tf.get_variable([tgt_vocab_size])
+
+        matricized_unary_scores = tf.matmul(output, weights) + bias
+
+        unary_scores = tf.reshape(
+            matricized_unary_scores,
+            [-1, time_steps, tgt_vocab_size])
+
+        log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
+            unary_scores, features["target"], features["source_length"])
+
+        if mode is "infer":
+            return unary_scores, transition_params, features["source_length"]
+
+
+
+        total_loss = tf.reduce_mean(-log_likelihood)
+
+    return total_loss
 
 class LSTM_CRF(model.Model):
 
@@ -149,14 +237,15 @@ class LSTM_CRF(model.Model):
             params.label_smoothing = 0.0
 
             with tf.variable_scope(self._scope):
-                log_prob = model_graph(features, "infer", params)
+                unary_scores, transition_params = model_graph(features, "infer", params)
 
-            return log_prob
+            return unary_scores, transition_params
 
         return inference_fn
 
     @staticmethod
     def get_name():
+
         return "lstm_crf"
 
     @staticmethod
