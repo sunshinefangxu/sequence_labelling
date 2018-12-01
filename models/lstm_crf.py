@@ -6,8 +6,7 @@
 
 import tensorflow as tf
 import copy
-import interface.model as model
-
+import thumt.interface as interface
 
 def _copy_through(time, length, output, new_output):
     copy_cond = (time >= length)
@@ -60,7 +59,7 @@ def _lstm_encoder(cell, inputs, sequence_length, initial_state, dtype):
         cell_output, new_state = cell(inp_t, state)
         cell_output = _copy_through(t, sequence_length, zero_output,
                                     cell_output)
-        new_state = _copy_through(t, sequence_length, state, new_state)
+        # new_state = _copy_through(t, sequence_length, state, new_state)
         out_ta = out_ta.write(t, cell_output)
         return t + 1, out_ta, new_state
 
@@ -170,8 +169,8 @@ def model_graph(features, mode, params):
             output = tf.nn.dropout(output, params.dropout)
 
         with tf.variable_scope("softmax"):
-            weights = tf.get_variable([params.hidden_size * 2, tgt_vocab_size])
-            bias = tf.get_variable([tgt_vocab_size])
+            weights = tf.get_variable("weights", [params.hidden_size * 2, tgt_vocab_size])
+            bias = tf.get_variable("bias", [tgt_vocab_size])
 
         matricized_unary_scores = tf.matmul(output, weights) + bias
 
@@ -179,19 +178,21 @@ def model_graph(features, mode, params):
             matricized_unary_scores,
             [-1, time_steps, tgt_vocab_size])
 
-        log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
+        if mode is "infer":
+            features["target"] = features["source"]
+            log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
             unary_scores, features["target"], features["source_length"])
 
-        if mode is "infer":
             return unary_scores, transition_params, features["source_length"]
 
-
+        log_likelihood, transition_params = tf.contrib.crf.crf_log_likelihood(
+            unary_scores, features["target"], features["source_length"])
 
         total_loss = tf.reduce_mean(-log_likelihood)
 
     return total_loss
 
-class LSTM_CRF(model.Model):
+class LSTM_CRF(interface.NMTModel):
 
     def __init__(self, params, scope='lstm_crf'):
         super(LSTM_CRF, self).__init__(params=params, scope=scope)
@@ -237,9 +238,9 @@ class LSTM_CRF(model.Model):
             params.label_smoothing = 0.0
 
             with tf.variable_scope(self._scope):
-                unary_scores, transition_params = model_graph(features, "infer", params)
+                unary_scores, transition_params, sequence_len = model_graph(features, "infer", params)
 
-            return unary_scores, transition_params
+            return unary_scores, transition_params, sequence_len
 
         return inference_fn
 
@@ -261,6 +262,7 @@ class LSTM_CRF(model.Model):
             rnn_cell="LSTM",
             embedding_size=100,
             hidden_size=100,
+            use_variational_dropout=False,
             # regularization
             dropout=0.2,
             constant_batch_size=True,

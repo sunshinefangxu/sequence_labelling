@@ -4,6 +4,12 @@
 # @FileName: model.py
 # @Software: PyCharm
 
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+
+
 class Model(object):
     def __init__(self, params, scope):
         self._params = params

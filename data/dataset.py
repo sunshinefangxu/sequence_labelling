@@ -142,8 +142,7 @@ def get_training_input(filenames, params):
             default_value=params.mapping["source"][params.unk]
         )
         tgt_table = tf.contrib.lookup.index_table_from_tensor(
-            tf.constant(params.vocabulary["target"]),
-            default_value=params.mapping["target"][params.unk]
+            tf.constant(params.vocabulary["target"])
         )
 
         # String to index lookup
@@ -215,7 +214,7 @@ def get_evaluation_input(inputs, params):
             lambda *x: {
                 "source": x[0],
                 "source_length": tf.shape(x[0])[0],
-                "references": x[1:]
+                "target": x[1:]
             },
             num_parallel_calls=params.num_threads
         )
@@ -225,12 +224,12 @@ def get_evaluation_input(inputs, params):
             {
                 "source": [tf.Dimension(None)],
                 "source_length": [],
-                "references": (tf.Dimension(None),) * (len(inputs) - 1)
+                "target": (tf.Dimension(None),) * (len(inputs) - 1)
             },
             {
                 "source": params.pad,
                 "source_length": 0,
-                "references": (params.pad,) * (len(inputs) - 1)
+                "target": (params.pad,) * (len(inputs) - 1)
             }
         )
 

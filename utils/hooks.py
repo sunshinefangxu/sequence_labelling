@@ -11,7 +11,7 @@ from __future__ import print_function
 import datetime
 import operator
 import os
-import utils.prf_score as prf_score
+import thumt.utils.prf_score as prf_score
 import tensorflow as tf
 
 
@@ -136,13 +136,12 @@ def _evaluate(eval_fn, input_fn, decode_fn, path, config):
     graph = tf.Graph()
     with graph.as_default():
         features = input_fn()
-        refs = features["references"]
+        refs = features["target"]
         placeholders = {
             "source": tf.placeholder(tf.int32, [None, None], "source"),
             "source_length": tf.placeholder(tf.int32, [None], "source_length")
         }
         predictions = eval_fn(placeholders)
-        predictions = predictions[0][:, 0, :]
 
         all_refs = [[] for _ in range(len(refs))]
         all_outputs = []
@@ -162,16 +161,22 @@ def _evaluate(eval_fn, input_fn, decode_fn, path, config):
                 # shape: [batch, len]
                 outputs = outputs.tolist()
                 # shape: ([batch, len], ..., [batch, len])
-                references = [item.tolist() for item in feats["references"]]
+                references = [item.tolist() for item in feats["target"]]
 
                 all_outputs.extend(outputs)
 
                 for i in range(len(refs)):
                     all_refs[i].extend(references[i])
-
+        all_outputs = [item[0] for item in all_outputs]
+        print(all_outputs)
+        print(all_refs[0])
         decoded_symbols = decode_fn(all_outputs)
-        decoded_refs = [decode_fn(refs) for refs in all_refs]
-        decoded_refs = [list(x) for x in zip(*decoded_refs)]
+        decoded_refs = decode_fn(all_refs[0])
+        print(decoded_symbols)
+        print(decoded_refs)
+        print('---------------------------')
+        # decoded_refs = [decode_fn(refs) for refs in all_refs]
+        # decoded_refs = [list(x) for x in zip(*decoded_refs)]
 
         return prf_score.getSegPRF(decoded_refs, decoded_symbols)
 
@@ -199,7 +204,7 @@ class EvaluationHook(tf.train.SessionRunHook):
         """
         tf.logging.info("Create EvaluationHook.")
 
-        if metric != "BLEU":
+        if metric != "ACC":
             raise ValueError("Currently, EvaluationHook only support BLEU")
 
         self._base_dir = base_dir.rstrip("/")

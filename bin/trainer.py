@@ -8,20 +8,21 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import models as models
-import data.vocab as vocabulary
-import data.dataset as dataset
-import data.cache as cache
-import utils.parallel as parallel
-import utils.optimize as optimize
-import utils.hooks as hooks
-import utils.inference as inference
 import argparse
 import os
 import six
 
 import numpy as np
 import tensorflow as tf
+import thumt.data.cache as cache
+import thumt.data.dataset as dataset
+import thumt.data.record as record
+import thumt.data.vocab as vocabulary
+import thumt.models as models
+import thumt.utils.hooks as hooks
+import thumt.utils.inference as inference
+import thumt.utils.optimize as optimize
+import thumt.utils.parallel as parallel
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
@@ -85,10 +86,10 @@ def default_parameters():
         learning_rate_decay="linear_warmup_rsqrt_decay",
         learning_rate_boundaries=[0],
         learning_rate_values=[0.0],
-        keep_checkpoint_max=20,
+        keep_checkpoint_max=10,
         keep_top_checkpoint_max=5,
         # Validation
-        eval_steps=2000,
+        eval_steps=1000,
         eval_secs=0,
         eval_batch_size=32,
         top_beams=1,
@@ -98,7 +99,7 @@ def default_parameters():
         validation="",
         references=[""],
         save_checkpoint_secs=0,
-        save_checkpoint_steps=1000,
+        save_checkpoint_steps=200,
         # Setting this to True can save disk spaces, but cannot restore
         # training using the saved checkpoint
         only_save_trainable=False
@@ -194,7 +195,7 @@ def override_parameters(params, args):
         ),
         "target": vocabulary.get_control_mapping(
             params.vocabulary["target"],
-            control_symbols
+            [params.pad]
         )
     }
 
@@ -301,7 +302,7 @@ def restore_variables(checkpoint):
 def main(args):
     tf.logging.set_verbosity(tf.logging.INFO)
     model_cls = models.get_model(args.model)
-
+    print(model_cls)
     params = default_parameters()
 
     # Import and override parameters

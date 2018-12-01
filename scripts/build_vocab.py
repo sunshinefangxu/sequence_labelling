@@ -55,7 +55,7 @@ def parse_args():
     parser.add_argument("output", default="vocab.txt",
                         help="Output vocabulary name")
     parser.add_argument("--limit", default=0, type=int, help="Vocabulary size")
-    parser.add_argument("--control", type=str, default="<pad>,<eos>,<unk>",
+    parser.add_argument("--control", type=str, default="<pad>,<unk>",
                         help="Add control symbols to vocabulary. "
                              "Control symbols are separated by comma.")
 

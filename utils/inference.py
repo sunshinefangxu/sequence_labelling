@@ -40,10 +40,8 @@ def create_inference_graph(models, features, params):
 
     batch_size = tf.shape(features["source"])[0]
     # 0 1 1
-    pad_id = params.mapping["target"][params.pad]
 
     model_fn = funcs[0]
-
     unary_scores, transition_params, sequence_len = model_fn(features)
 
     viterbi_sequence, _ = tf.contrib.crf.crf_decode(
@@ -52,7 +50,7 @@ def create_inference_graph(models, features, params):
     tgt_mask = tf.sequence_mask(sequence_len, maxlen=tf.shape(unary_scores)[1])
     tgt_mask = tf.cast(tgt_mask, tf.int32)
     viterbi_sequence = tf.multiply(viterbi_sequence, tgt_mask)
-
+    viterbi_sequence = tf.expand_dims(viterbi_sequence, 1)
     return viterbi_sequence
 
 if __name__=='__main__':

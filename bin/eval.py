@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2018/6/9 上午10:47
-# @Author  : lfx
-# @FileName: eval.py
-# @Software: PyCharm
+#!/usr/bin/env python
+# coding=utf-8
+# Copyright 2018 The THUMT Authors
 
 from __future__ import absolute_import
 from __future__ import division
@@ -11,13 +9,16 @@ from __future__ import print_function
 import argparse
 import itertools
 import os
-import models
-import data.dataset as dataset
-import data.vocab as vocabulary
-import utils.parallel as parallel
-import utils.inference as inference
+
 import numpy as np
 import tensorflow as tf
+import thumt.data.dataset as dataset
+import thumt.data.vocab as vocabulary
+import thumt.models as models
+import thumt.utils.inference as inference
+import thumt.utils.parallel as parallel
+import thumt.utils.sampling as sampling
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -61,9 +62,6 @@ def default_parameters():
         device_list=[0],
         num_threads=1,
         # decoding
-        top_beams=1,
-        beam_size=4,
-        decode_alpha=0.6,
         decode_length=50,
         decode_batch_size=32,
         # sampling
@@ -139,7 +137,7 @@ def override_parameters(params, args):
         ),
         "target": vocabulary.get_control_mapping(
             params.vocabulary["target"],
-            control_symbols
+            [params.pad]
         )
     }
 
@@ -179,6 +177,7 @@ def set_variables(var_list, value_dict, prefix, feed_dict):
 
 
 def shard_features(features, placeholders, predictions):
+    predictions = (predictions,)
     num_shards = len(placeholders)
     feed_dict = {}
     n = 0
@@ -199,10 +198,35 @@ def shard_features(features, placeholders, predictions):
                 n = num_shards
 
     if isinstance(predictions, (list, tuple)):
+        print(predictions)
         predictions = [item[:n] for item in predictions]
-
+    print(predictions)
     return predictions, feed_dict
 
+
+def get_final_res(source, label):
+
+    '''
+        source:str
+        label:str
+    '''
+
+    source_list, label_list = source.split(), label.split()
+    res = []
+    assert len(source_list) == len(label_list)
+    tmp_list = []
+    for i in range(len(label_list)):
+
+        if label_list[i] == "S":
+            res.append(source_list[i])
+
+        elif label_list[i] == "B" or label_list[i] == "M":
+            tmp_list.append(source_list[i])
+        else:
+            tmp_list.append(source_list[i])
+            res.append("".join(tmp_list))
+            tmp_list = []
+    return " ".join(res)
 
 def main(args):
     tf.logging.set_verbosity(tf.logging.INFO)
@@ -270,8 +294,10 @@ def main(args):
             })
 
         # A list of outputs
-
-        inference_fn = inference.create_inference_graph
+        if params.generate_samples:
+            inference_fn = sampling.create_sampling_graph
+        else:
+            inference_fn = inference.create_inference_graph
 
         predictions = parallel.data_parallelism(
             params.device_list, lambda f: inference_fn(model_list, f, params),
@@ -322,49 +348,41 @@ def main(args):
         vocab = params.vocabulary["target"]
         outputs = []
         scores = []
-
         for result in results:
             for item in result[0]:
                 outputs.append(item.tolist())
-            for item in result[1]:
-                scores.append(item.tolist())
-
         outputs = list(itertools.chain(*outputs))
-        scores = list(itertools.chain(*scores))
-
         restored_inputs = []
         restored_outputs = []
-        restored_scores = []
-
         for index in range(len(sorted_inputs)):
             restored_inputs.append(sorted_inputs[sorted_keys[index]])
             restored_outputs.append(outputs[sorted_keys[index]])
-            restored_scores.append(scores[sorted_keys[index]])
-
         # Write to file
         with open(args.output, "w") as outfile:
             count = 0
-            for outputs, scores in zip(restored_outputs, restored_scores):
-                for output, score in zip(outputs, scores):
+            for outputs in restored_outputs:
+                for output in outputs:
                     decoded = []
                     for idx in output:
-                        if idx == params.mapping["target"][params.eos]:
+                        if idx == params.mapping["target"][params.pad]:
                             break
                         decoded.append(vocab[idx])
 
+                    source = restored_inputs[count]
                     decoded = " ".join(decoded)
-
+                    decoded = get_final_res(source, decoded)
+                    print(decoded)
                     if not args.verbose:
                         outfile.write("%s\n" % decoded)
                         break
                     else:
                         pattern = "%d ||| %s ||| %s ||| %f\n"
                         source = restored_inputs[count]
-                        values = (count, source, decoded, score)
+                        values = (count, source, decoded)
                         outfile.write(pattern % values)
 
                 count += 1
 
 
-if __name__=='__main__':
+if __name__ == "__main__":
     main(parse_args())

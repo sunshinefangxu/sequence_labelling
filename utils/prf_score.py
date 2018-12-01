@@ -4,7 +4,24 @@
 # @FileName: prf.py
 # @Software: PyCharm
 
+def tool(ref):
+    res = []
+    for item in ref:
+        ref_new = []
+        c_list = []
+        for c in item:
+            if c == "E" or c == "S":
+                c_list.append(c)
+                ref_new.append("".join(c_list))
+                c_list = []
+            else:
+                c_list.append(c)
+        res.append(ref_new)
+    return [' '.join(item) for item in res]
+
 def getSegPRF(ref,result):
+    ref = tool(ref)
+    result = tool(result)
     RefWordNum = 0
     CorrectNum = 0
     ErrorNum = 0
@@ -67,3 +84,4 @@ def getSegPRF(ref,result):
     f = float(2*p*r)/float(p+r)
 
     return f
+

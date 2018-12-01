@@ -17,7 +17,7 @@ def get_model(name):
     name = name.lower()
 
     if name == "lstm_crf":
-        return models.lstm_crf
+        return models.lstm_crf.LSTM_CRF
     elif name == "bi_lstm_crf":
         return models.bi_lstm_crf
     elif name == "lstm_cnn":
