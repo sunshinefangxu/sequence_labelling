@@ -1,0 +1,1 @@
+python translator.py --models transformer lstm_crf lstm_cnn --input train_data/ctb6/ctb6.dev --output train_data/ctb6/ctb6.dev.out --vocabulary vocab.char.txt vocab.label.txt --checkpoints train-transformer/eval/avg train-crf/eval/avg train --parameters=device_list=[1]
